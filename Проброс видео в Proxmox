@@ -1,0 +1,237 @@
+
+### Документация Proxmox:
+https://pve.proxmox.com/pve-docs/chapter-qm.html#_general_requirements
+
+Как определить, используете ли вы grub или cmdline
+
+```
+efibootmgr -v
+```
+
+Если вы видите что-то вроде “File (\EFI\ SYSTEMD \SYSTEMD-BOOTX64.EFI)”, значит, вы используете systemd, а не GRUB.
+
+Если у вас есть cmdline, отредактируйте конфигурационный файл
+
+```
+nano /etc/kernel/cmdline
+```
+
+вставить в конец строки 
+для AMD - quiet amd_iommu=on iommu=pt
+для Intel - quiet intel_iommu=on iommu=pt
+
+Затем обновите инструмент загрузки
+
+```
+proxmox-boot-tool refresh
+```
+
+Затем перезагрузите компьютер.
+
+
+## Редактируем GRAB
+
+### Заносим данные в:
+
+```
+nano /etc/default/grub
+```
+
+### Строка для Intel:
+
+```
+GRUB_CMDLINE_LINUX_DEFAULT="quiet intel_iommu=on iommu=pt"
+```
+
+### Строка для  AMD:
+
+```
+GRUB_CMDLINE_LINUX_DEFAULT="quiet amd_iommu=on"
+```
+
+Ctrl+O - сохранить файл
+Ctrl+x - выйти из редактора
+
+### Выполняем команду:
+
+```
+update-grub
+```
+
+### и перезагружаемся.
+
+```
+reboot
+```
+
+### Проверка что IOMMU включен:
+
+```
+dmesg | grep -e DMAR -e IOMMU
+```
+
+Должна присутствовать строчка:
+DMAR: IOMMU enabled
+
+-------------------------------------
+
+### Включаем VFIO модули:
+
+```
+nano /etc/modules
+```
+
+### вносим:
+
+```
+vfio
+vfio_iommu_type1
+vfio_pci
+vfio_virqfd
+```
+
+Сохраняем и выходим.
+
+### Далее выполняем команду:
+
+```
+update-initramfs -u -k all
+```
+
+### и перезагрузка:
+
+```
+reboot
+```
+
+### Проверка что модули включены:
+
+```
+dmesg | grep -i vfio
+```
+
+Смотрим версию метадрайвера. 
+Например у меня так:
+VFIO - User Level meta-driver version: 0.3
+
+------------------------------------
+
+### Чтобы увидеть все устройства и их идентификационные номера
+
+```
+lspci -nn
+```
+
+### Такие устройства у меня. Встроенная графика в процессор, и дискретная видеокарта:
+
+> 00:02.0 Display controller [0380]: Intel Corporation AlderLake-S GT1 [8086:4680] (rev 0c)
+> 01:00.0 VGA compatible controller [0300]: NVIDIA Corporation GA104 [GeForce RTX 3060] 
+> [10de:2487] (rev a1)
+> 01:00.1 Audio device [0403]: NVIDIA Corporation GA104 High Definition Audio Controller 10de:228b] (rev a1)
+> 04:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Lexa PRO [Radeon 540/540X/550/550X / RX 540X/550/550X] [1002:699f] (rev c7)
+04:00.1 Audio device [0403]: Advanced Micro Devices, Inc. [AMD/ATI] Baffin HDMI/DP Audio [Radeon RX 550 640SP / RX 560/560X] [1002:aae0]
+
+
+### Узнать идентификатор конкретноно устройства (хотя он уже отображен в списке выше):
+
+```
+lspci -n -s 01:00 - пример для видеокарты. Для встроенной будет - 00:02
+```
+
+### Пример вывода для
+GeForce RTX 3060
+
+> root@pve:~# lspci -n -s 01:00
+> 01:00.0 0300: 10de:2487 (rev a1) - видеокарта
+> 01:00.1 0403: 10de:228b (rev a1) - звук с этой видеокарты
+
+### и вывод для встроенной графики
+
+> root@pve:~# lspci -n -s 00:02
+> 00:02.0 0380: 8086:4680 (rev 0c)
+
+## Пишем запрет использования устройства в хостовой системе (в Proxmox)
+В данном случае запрет на дискретную видеокарту GeForce RTX 3060, и второй параметр (указывается через запятую без пробелов) встроенная видеокарта в процессор. Это уже как пример.
+
+```
+echo "options vfio-pci ids=10de:2487,1002:699f disable_vga=1" > /etc/modprobe.d/vfio.conf
+```
+
+## Дальше заносим устройства в черный список загрузки
+### Команды для записи в файл
+
+Черный список драйверов графического процессора (здесь все, что вам когда-либо понадобится)
+
+### AMD GPUs
+
+```
+echo "blacklist radeon" >> /etc/modprobe.d/blacklist.conf
+```
+
+```
+echo "blacklist nouveau" >> /etc/modprobe.d/blacklist.conf
+```
+
+### NVIDIA GPUs
+
+```
+echo "blacklist nvidia" >> /etc/modprobe.d/blacklist.conf
+```
+
+```
+echo "blacklist nvidiafb" >> /etc/modprobe.d/blacklist.conf
+```
+
+### Intel GPUs
+
+```
+echo "blacklist nvidia_drm" >> /etc/modprobe.d/blacklist.conf
+```
+
+
+------------------------
+
+### Либо так:
+
+```
+nano /etc/modprobe.d/pve-blacklist.conf
+```
+
+```
+blacklist nouveau
+blacklist nvidia
+blacklist nvidiafb
+blacklist snd_hda_codec_hdmi
+blacklist snd_hda_intel
+blacklist snd_hda_codec
+blacklist snd_hda_core
+blacklist radeon
+blacklist amdgpu
+```
+
+
+# Если не пробрасывается карта AMD RX550 в linux
+
+Просматривая сообщения ядра для wx-4100 / rx550 / rx560 в Ubuntu guest, я вижу только одно основное отличие.  
+  
+550:  
+```
+[   10.409863] amdgpu 0000:06:10.0: amdgpu: Using BACO for runtime pm
+```
+  
+Может быть, что-то есть?  
+* [https://patchwork.kernel.org/projec...115165038.56646-16-alexander.deucher@amd.com/](https://patchwork.kernel.org/project/alsa-devel/patch/20191115165038.56646-16-alexander.deucher@amd.com/)  
+* [https://www.reddit.com/r/pop_os/comments/od64a3/how_do_i_add_amdgpurunpm0_in_the_boot_parameter/](https://www.reddit.com/r/pop_os/comments/od64a3/how_do_i_add_amdgpurunpm0_in_the_boot_parameter/)  
+
+итак, в /etc/default/grub ((( Внутри ГОСТЕВОЙ машины Linux)) Я добавил  
+
+Код:
+```
+GRUB_CMDLINE_LINUX_DEFAULT="amdgpu.runpm=0"
+```
+  
+И вуаля! Карта исправна, блокировок нет. RX550 исправен, WX4100 исправен  
+Я не знаю, почему amdgpu.runpm = 1 (по умолчанию) полностью подключает шину PCI в KVM, но это так. (Возможно, отслеживается / решается в KVM 8.x?)
+
+-----------------
+
